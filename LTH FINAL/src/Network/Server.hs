@@ -10,6 +10,7 @@ import qualified Data.Map.Strict as Map
 import qualified Network.WebSockets as WS
 import Data.Text (Text)
 import qualified Data.Text as T
+import Data.ByteString.Lazy (ByteString)
 
 import Game.Types
 import Game.Board
@@ -52,16 +53,21 @@ runServer port = do
 handleClient :: ServerState -> WS.Connection -> IO ()
 handleClient serverState conn = do
   putStrLn "New client connected"
-  
-  -- Nhận tên player
-  msg <- WS.receiveData conn
-  case decode msg of
-    Just (JoinGame playerName) -> do
-      putStrLn $ "Player joined: " ++ T.unpack playerName
-      matchPlayer serverState conn playerName
-    _ -> do
-      sendMessage conn (ErrorMsg "Expected JoinGame message")
+  msg <- WS.receiveBinaryData conn  -- Dùng Binary thay vì Text
+  case decodeBinary msg of
+    Nothing -> do
+      sendMessage conn (ErrorMsg "Invalid binary message")
       return ()
+    Just decoded -> case validateMessage decoded of
+      Right (JoinGame playerName) -> do
+        putStrLn $ "Player joined: " ++ T.unpack playerName
+        matchPlayer serverState conn playerName
+      Right _ -> do
+        sendMessage conn (ErrorMsg "Expected JoinGame message")
+        return ()
+      Left err -> do
+        sendMessage conn (ErrorMsg err)
+        return ()
 
 -- Ghép cặp players
 matchPlayer :: ServerState -> WS.Connection -> PlayerName -> IO ()
@@ -94,8 +100,20 @@ matchPlayer serverState conn playerName = do
 -- Chờ đối thủ
 waitForGame :: ServerState -> WS.Connection -> PlayerName -> IO ()
 waitForGame serverState conn playerName = do
-  -- Logic này sẽ được trigger khi có player khác join
-  forever $ WS.receiveData conn >> return ()
+  result <- timeout 90000000 $ forever $ do  -- Timeout 90 giây (từ Bước 1 cải thiện)
+    msg <- WS.receiveBinaryData conn
+    case decodeBinary msg of
+      Just decoded -> case validateMessage decoded of
+        Right LeaveGame -> throwIO $ userError "Client left waiting queue"
+        Right _ -> return ()  -- Ignore message khác
+        Left err -> sendMessage conn (ErrorMsg err)
+      Nothing -> sendMessage conn (ErrorMsg "Invalid binary message")
+  case result of
+    Nothing -> do
+      sendMessage conn (ErrorMsg "Timeout waiting for opponent")
+      atomically $ modifyTVar' (waitingPlayers serverState) (filter ((/= conn) . fst))
+      return ()
+    Just _ -> return ()
 
 -- Bắt đầu game giữa 2 players
 startGame :: ServerState -> GameId -> WS.Connection -> PlayerName 
@@ -125,66 +143,84 @@ startGame serverState gameId conn1 name1 conn2 name2 = do
   return ()
 
 -- Xử lý messages trong game
-handleGameMessages :: ServerState -> GameId -> WS.Connection 
-                   -> Player -> IO ()
-handleGameMessages serverState gameId conn player = do
+handleGameMessages :: ServerState -> GameId -> WS.Connection -> Player -> IO ()
+handleGameMessages serverState gameId conn player = 
   forever $ do
-    msg <- WS.receiveData conn
-    case decode msg of
-      Just (MakeMove column) -> do
-        result <- atomically $ do
-          gamesMap <- readTVar (games serverState)
-          case Map.lookup gameId gamesMap of
-            Nothing -> return $ Left "Game not found"
-            Just session -> do
-              state <- readTVar (gameState session)
-              -- Kiểm tra lượt chơi
-              if currentPlayer state /= player
-                then return $ Left "Not your turn"
-                else case makeMove (board state) column player of
-                  Nothing -> return $ Left "Invalid move"
-                  Just newBoard -> do
-                    let newState = state 
-                          { board = newBoard
-                          , currentPlayer = opponent player
-                          , moveHistory = column : moveHistory state
-                          }
-                    writeTVar (gameState session) newState
-                    return $ Right (session, newState)
-        
-        case result of
-          Left err -> sendMessage conn (ErrorMsg $ T.pack err)
-          Right (session, newState) -> do
-            -- Broadcast update cho cả 2 players
-            let (conn1, _) = player1 session
-            let (conn2, _) = player2 session
-            sendMessage conn1 (GameUpdate newState)
-            sendMessage conn2 (GameUpdate newState)
-            
-            -- Kiểm tra thắng/thua
-            case checkWinner (board newState) of
-              Just winner -> do
-                sendMessage conn1 (GameOver (Just winner))
-                sendMessage conn2 (GameOver (Just winner))
-                -- Remove game
-                atomically $ modifyTVar' (games serverState) 
-                  (Map.delete gameId)
-              Nothing -> 
-                if isBoardFull (board newState)
-                  then do
-                    sendMessage conn1 (GameOver Nothing)
-                    sendMessage conn2 (GameOver Nothing)
-                  else return ()
-      
-      Just (ChatMessage text) -> do
-        -- Broadcast chat message
-        return ()
-      
-      _ -> sendMessage conn (ErrorMsg "Invalid message")
+    msg <- WS.receiveBinaryData conn
+    case decodeBinary msg of
+      Nothing -> sendMessage conn (ErrorMsg "Invalid binary message")
+      Just decoded -> case validateMessage decoded of
+        Left err -> sendMessage conn (ErrorMsg err)
+        Right (MakeMove column) -> do
+          result <- atomically $ do
+            gamesMap <- readTVar (games serverState)
+            case Map.lookup gameId gamesMap of
+              Nothing -> return $ Left "Game not found"
+              Just session -> do
+                state <- readTVar (gameState session)
+                if currentPlayer state /= player
+                  then return $ Left "Not your turn"
+                  else case makeMove (board state) column player of
+                    Nothing -> return $ Left "Invalid move"
+                    Just newBoard -> do
+                      let newState = state 
+                            { board = newBoard
+                            , currentPlayer = opponent player
+                            , moveHistory = column : moveHistory state
+                            }
+                      writeTVar (gameState session) newState
+                      return $ Right (session, newState)
+          
+          case result of
+            Left err -> sendMessage conn (ErrorMsg $ T.pack err)
+            Right (session, newState) -> do
+              let (conn1, _) = player1 session
+              let (conn2, _) = player2 session
+              sendMessage conn1 (GameUpdate newState)
+              sendMessage conn2 (GameUpdate newState)
+              
+              case checkWinner (board newState) of
+                Just winner -> do
+                  let reason = NormalWin
+                  let moves = moveCount newState
+                  let p1Name = snd (player1 session)
+                  let p2Name = snd (player2 session)
+                  let result = GameResult (Just winner) reason moves p1Name p2Name
+                  sendMessage conn1 (GameOver result)
+                  sendMessage conn2 (GameOver result)
+                  atomically $ modifyTVar' (games serverState) (Map.delete gameId)
+                Nothing -> 
+                  if isBoardFull (board newState)
+                    then do
+                      let reason = BoardFull
+                      let moves = moveCount newState
+                      let p1Name = snd (player1 session)
+                      let p2Name = snd (player2 session)
+                      let result = GameResult Nothing reason moves p1Name p2Name
+                      sendMessage conn1 (GameOver result)
+                      sendMessage conn2 (GameOver result)
+                      atomically $ modifyTVar' (games serverState) (Map.delete gameId)
+                    else return ()
+        Right (ChatMessage text) -> do
+          atomically $ do
+            gamesMap <- readTVar (games serverState)
+            case Map.lookup gameId gamesMap of
+              Nothing -> return ()
+              Just session -> do
+                let senderName = if player == Red then snd (player1 session) else snd (player2 session)
+                let (conn1, _) = player1 session
+                let (conn2, _) = player2 session
+                liftIO $ sendMessage conn1 (ChatReceived senderName text)
+                liftIO $ sendMessage conn2 (ChatReceived senderName text)
+        Right _ -> sendMessage conn (ErrorMsg "Invalid message in game")
+  `catch` (\(SomeException e) -> do
+    putStrLn $ "Exception in game: " ++ show e
+    cleanupConn conn
+  )
 
 -- Helper: gửi message
 sendMessage :: WS.Connection -> Message -> IO ()
-sendMessage conn msg = WS.sendTextData conn (encode msg)
+sendMessage conn msg = WS.sendBinaryData conn (encodeBinary msg)
 
 -- Helper: đối thủ
 opponent :: Player -> Player

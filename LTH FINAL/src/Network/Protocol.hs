@@ -9,6 +9,7 @@ import Data.Binary
 import GHC.Generics
 import Data.ByteString.Lazy (ByteString)
 import qualified Data.ByteString.Lazy as BL
+import Control.Applicative ((<|>))
 
 -- ============================================================
 -- Message Types
@@ -45,6 +46,81 @@ instance Binary Message
 
 type PlayerName = Text
 
+-- Binary instance cho GameEndReason
+instance Binary GameEndReason where
+  put NormalWin = putWord8 0
+  put BoardFull = putWord8 1
+  put Resignation = putWord8 2
+  put Timeout = putWord8 3
+  put Disconnection = putWord8 4
+
+  get = do
+    tag <- getWord8
+    case tag of
+      0 -> return NormalWin
+      1 -> return BoardFull
+      2 -> return Resignation
+      3 -> return Timeout
+      4 -> return Disconnection
+      _ -> fail "Invalid GameEndReason tag"
+
+-- Binary instance cho GameResult
+instance Binary GameResult where
+  put (GameResult winner reason moveCount p1Name p2Name) = do
+    put winner           -- Maybe Player
+    put reason           -- GameEndReason
+    put moveCount        -- Int
+    put p1Name           -- Text
+    put p2Name           -- Text
+
+  get = GameResult
+    <$> get              -- Maybe Player
+    <*> get              -- GameEndReason
+    <*> get              -- Int
+    <*> get              -- Text
+    <*> get              -- Text
+
+-- Binary instance cho Message
+instance Binary Message where
+  put (JoinGame name) = putWord8 0 >> put name
+  put (MakeMove col) = putWord8 1 >> put col
+  put (ChatMessage text) = putWord8 2 >> put text
+  put LeaveGame = putWord8 3
+  put RequestRematch = putWord8 4
+  put (GameUpdate state) = putWord8 5 >> put state
+  put (GameOver result) = putWord8 6 >> put result
+  put WaitingForOpponent = putWord8 7
+  put (OpponentConnected name) = putWord8 8 >> put name
+  put OpponentDisconnected = putWord8 9
+  put (ErrorMsg text) = putWord8 10 >> put text
+  put (ChatReceived name text) = putWord8 11 >> put name >> put text
+  put (RematchRequest name) = putWord8 12 >> put name
+  put RematchAccepted = putWord8 13
+  put RematchDeclined = putWord8 14
+  put Ping = putWord8 15
+  put Pong = putWord8 16
+
+  get = do
+    tag <- getWord8
+    case tag of
+      0 -> JoinGame <$> get
+      1 -> MakeMove <$> get
+      2 -> ChatMessage <$> get
+      3 -> return LeaveGame
+      4 -> return RequestRematch
+      5 -> GameUpdate <$> get
+      6 -> GameOver <$> get
+      7 -> return WaitingForOpponent
+      8 -> OpponentConnected <$> get
+      9 -> return OpponentDisconnected
+      10 -> ErrorMsg <$> get
+      11 -> ChatReceived <$> get <*> get
+      12 -> RematchRequest <$> get
+      13 -> return RematchAccepted
+      14 -> return RematchDeclined
+      15 -> return Ping
+      16 -> return Pong
+      _ -> fail "Invalid Message tag"
 -- ============================================================
 -- Game Result (for end game)
 -- ============================================================
@@ -145,25 +221,34 @@ encodeMessageSafe msg = do
 
 -- Decode with validation
 decodeMessageSafe :: ByteString -> Either Text Message
-decodeMessageSafe bs = 
-  case decodeMessage bs of
-    Nothing -> Left "Failed to decode message"
-    Just msg -> validateMessage msg
+decodeBinarySafe bs = case Data.Binary.decodeOrFail bs of
+  Left (_, _, err) -> Left $ T.pack err
+  Right (_, _, msg) -> validateMessage msg
 
 -- ============================================================
 -- Binary Encoding (for efficiency)
 -- ============================================================
 
--- Encode message to binary
-encodeBinary :: Message -> ByteString
-encodeBinary = encode
+-- Encode message to binary #( lưu ý )
+-- encodeBinary :: Message -> ByteString
+-- encodeBinary = encode
 
--- Decode binary message
+-- -- Decode binary message
+-- decodeBinary :: ByteString -> Maybe Message
+-- decodeBinary bs = 
+--   case decodeOrFail bs of
+--     Right (_, _, msg) -> Just msg
+--     Left _ -> Nothing
+
+-- Binary Encoding (for efficiency)
+encodeBinary :: Message -> ByteString
+encodeBinary = Data.Binary.encode
+
+-- -- Decode binary message
 decodeBinary :: ByteString -> Maybe Message
-decodeBinary bs = 
-  case decodeOrFail bs of
-    Right (_, _, msg) -> Just msg
-    Left _ -> Nothing
+decodeBinary bs = case Data.Binary.decodeOrFail bs of
+  Right (_, _, msg) -> Just msg
+  Left _ -> Nothing
 
 -- ============================================================
 -- Protocol Version
