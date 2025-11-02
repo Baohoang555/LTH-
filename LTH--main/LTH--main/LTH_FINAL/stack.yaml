@@ -1,0 +1,39 @@
+# Resolver for GHC 9.6.7
+resolver: lts-22.39
+
+# Packages to include
+packages:
+- .
+
+# Extra dependencies not in the resolver
+extra-deps: []
+
+# System dependencies
+# For graphics libraries on different platforms
+system-ghc: false
+
+# Recommended flags
+flags: {}
+
+# Extra package databases
+extra-package-dbs: []
+
+# Allow newer versions of dependencies
+allow-newer: true
+
+# GHC options for all packages
+ghc-options:
+  "$everything": -O2
+
+# Platform-specific configuration
+# For Linux
+# system-ghc: false
+# install-ghc: true
+
+# For macOS
+# system-ghc: false
+# install-ghc: true
+
+# For Windows
+# system-ghc: false
+# install-ghc: true
