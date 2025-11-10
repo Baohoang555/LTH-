@@ -1,0 +1,63 @@
+name: connect-four
+version: 0.1.0.0
+github: "yourname/connect-four"
+license: BSD3
+author: "Your Name"
+maintainer: "your@email.com"
+
+dependencies:
+- base >= 4.7 && < 5
+- network >= 3.0
+- aeson >= 2.0
+- bytestring >= 0.11
+
+library:
+  source-dirs: src
+  exposed-modules:
+    - Core.Types
+    - Core.Board
+    - Core.AI
+    - Network.Client
+    - Network.Server
+    - Network.Message
+    - Utils.Parser
+    - Utils.Serializer
+    - Utils.Concurrency
+
+executables:
+  connect4-client:
+    main: Main.hs
+    source-dirs: app/Client
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - connect-four
+  
+  connect4-server:
+    main: Main.hs
+    source-dirs: app/Server
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - connect-four
+
+tests:
+  connect4-test:
+    main: Spec.hs
+    source-dirs: test
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    dependencies:
+    - connect-four
+    - hspec >= 2.0
+    - QuickCheck
+
+default-extensions:
+- OverloadedStrings
+- DeriveGeneric
